@@ -9,8 +9,38 @@ const {
 
 const { getOptions } = require(`./plugin-options`)
 
-const backRefsNamesLookup = new Map()
-const referencedNodesLookup = new Map()
+let backRefsNamesLookup = new Map()
+let referencedNodesLookup = new Map()
+
+const initRefsLookups = async ({ cache }) => {
+  const backRefsNamesLookupStr = await cache.get(`backRefsNamesLookup`)
+  const referencedNodesLookupStr = await cache.get(`referencedNodesLookup`)
+
+  if (backRefsNamesLookupStr) {
+    backRefsNamesLookup = new Map(JSON.parse(backRefsNamesLookupStr))
+  }
+
+  if (referencedNodesLookupStr) {
+    referencedNodesLookup = new Map(JSON.parse(referencedNodesLookupStr))
+  }
+}
+
+exports.initRefsLookups = initRefsLookups
+
+const storeRefsLookups = async ({ cache }) => {
+  await Promise.all([
+    cache.set(
+      `backRefsNamesLookup`,
+      JSON.stringify(Array.from(backRefsNamesLookup.entries()))
+    ),
+    cache.set(
+      `referencedNodesLookup`,
+      JSON.stringify(Array.from(referencedNodesLookup.entries()))
+    ),
+  ])
+}
+
+exports.storeRefsLookups = storeRefsLookups
 
 const handleReferences = (
   node,
@@ -132,7 +162,7 @@ const handleDeletedNode = async ({
       createNodeIdWithVersion(
         node.id,
         node.type,
-        getOptions().languageConfig ? node.attributes.langcode : `und`,
+        getOptions().languageConfig ? node.attributes?.langcode : `und`,
         node.attributes?.drupal_internal__revision_id,
         entityReferenceRevisions
       )
@@ -224,9 +254,9 @@ const handleWebhookUpdate = async (
   },
   pluginOptions = {}
 ) => {
-  if (!nodeToUpdate || !nodeToUpdate.attributes) {
+  if (!nodeToUpdate) {
     reporter.warn(
-      `The updated node was empty or is missing the required attributes field. The fact you're seeing this warning means there's probably a bug in how we're creating and processing updates from Drupal.
+      `The updated node was empty. The fact you're seeing this warning means there's probably a bug in how we're creating and processing updates from Drupal.
 
 ${JSON.stringify(nodeToUpdate, null, 4)}
       `
@@ -235,13 +265,26 @@ ${JSON.stringify(nodeToUpdate, null, 4)}
     return
   }
 
-  const { createNode } = actions
+  reporter.log(
+    `[drupal]: handling update to:
+    - entity href: ${nodeToUpdate.links?.self?.href}
+    - node id: ${nodeToUpdate.attributes?.drupal_internal__nid}
+`
+  )
+
+  const { createNode, unstable_createNodeManifest } = actions
 
   const newNode = nodeFromData(
     nodeToUpdate,
     createNodeId,
     pluginOptions.entityReferenceRevisions
   )
+
+  drupalCreateNodeManifest({
+    attributes: nodeToUpdate.attributes,
+    gatsbyNode: newNode,
+    unstable_createNodeManifest,
+  })
 
   const nodesToUpdate = [newNode]
 
@@ -326,7 +369,41 @@ ${JSON.stringify(nodeToUpdate, null, 4)}
     }
     node.internal.contentDigest = createContentDigest(node)
     createNode(node)
-    reporter.log(`Updated node: ${node.id}`)
+    reporter.log(
+      `Updated Gatsby node — id: ${node.id} type: ${node.internal.type}`
+    )
+  }
+}
+
+let hasLoggedContentSyncWarning = false
+/**
+ * This fn creates node manifests which are used for Gatsby Cloud Previews via the Content Sync API/feature.
+ * Content Sync routes a user from Drupal to a page created from the entry data they're interested in previewing.
+ */
+function drupalCreateNodeManifest({
+  attributes,
+  gatsbyNode,
+  unstable_createNodeManifest,
+}) {
+  const isPreview =
+    (process.env.NODE_ENV === `development` &&
+      process.env.ENABLE_GATSBY_REFRESH_ENDPOINT) ||
+    process.env.GATSBY_IS_PREVIEW === `true`
+
+  if (typeof unstable_createNodeManifest === `function` && isPreview) {
+    const manifestId = `${attributes.drupal_internal__nid}-${attributes.revision_timestamp}`
+
+    console.info(`Drupal: Creating node manifest with id ${manifestId}`)
+
+    unstable_createNodeManifest({
+      manifestId,
+      node: gatsbyNode,
+    })
+  } else if (!hasLoggedContentSyncWarning) {
+    hasLoggedContentSyncWarning = true
+    console.warn(
+      `Drupal: Your version of Gatsby core doesn't support Content Sync (via the unstable_createNodeManifest action). Please upgrade to the latest version to use Content Sync in your site.`
+    )
   }
 }
 
